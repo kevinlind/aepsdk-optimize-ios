@@ -30,10 +30,10 @@ public class Optimize: NSObject, Extension {
     private let eventsQueue = OperationOrderer<Event>("OptimizeEvents")
 
     /// a dictionary containing the update event IDs (and corresponding requested scopes) for Edge events that haven't yet received an Edge completion response.
-    private var updateRequestEventIdsInProgress: [String: [DecisionScope]] = [:]
+    private let updateRequestEventIdsInProgress = ThreadSafeDictionary<String, [DecisionScope]>(identifier: "com.adobe.optimize.updateRequestEventIdsInProgress")
 
     /// a dictionary to accumulate propositions returned in various personalization:decisions events for the same Edge personalization request.
-    private var propositionsInProgress: [DecisionScope: OptimizeProposition] = [:]
+    private let propositionsInProgress = ThreadSafeDictionary<DecisionScope, OptimizeProposition>(identifier: "com.adobe.optimize.propositionsInProgress")
 
     /// Array containing the schema strings for the proposition items supported by the SDK, sent in the personalization query request.
     static let supportedSchemas = [
@@ -207,7 +207,10 @@ public class Optimize: NSObject, Extension {
             else {
                 // response event failed or timed out, remove this event's ID from the requested event IDs dictionary and kick-off queue.
                 self.updateRequestEventIdsInProgress.removeValue(forKey: edgeEvent.id.uuidString)
-                self.propositionsInProgress.removeAll()
+                let keys = self.propositionsInProgress.keys
+                for key in keys {
+                    self.propositionsInProgress.removeValue(forKey: key)
+                }
 
                 self.eventsQueue.start()
                 return
@@ -229,7 +232,10 @@ public class Optimize: NSObject, Extension {
     /// - Parameter event: Optimize content complete event.
     private func processUpdatePropositionsCompleted(event: Event) {
         defer {
-            propositionsInProgress.removeAll()
+            let keys = propositionsInProgress.keys
+            for key in keys {
+                propositionsInProgress.removeValue(forKey: key)
+            }
 
             // kick off processing the internal events queue after processing is completed for an update propositions request.
             eventsQueue.start()
@@ -259,7 +265,7 @@ public class Optimize: NSObject, Extension {
     /// - Parameter requestedScope: an array of decision scopes for which propositions are requested.
     private func updateCachedPropositions(for requestedScopes: [DecisionScope]) {
         // update cache with accumulated propositions
-        cachedPropositions.merge(propositionsInProgress) { _, new in new }
+        cachedPropositions.merge(propositionsInProgress.shallowCopy) { _, new in new }
 
         // remove cached propositions for requested scopes for which no propositions are returned.
         let returnedScopes = Array(propositionsInProgress.keys) as [DecisionScope]
@@ -278,13 +284,16 @@ public class Optimize: NSObject, Extension {
         guard
             event.isPersonalizationDecisionResponse,
             let requestEventId = event.requestEventId,
-            updateRequestEventIdsInProgress.contains(where: { $0.key == requestEventId })
+            updateRequestEventIdsInProgress.shallowCopy.contains(where: { $0.key == requestEventId })
         else {
             Log.debug(label: OptimizeConstants.LOG_TAG,
                       """
                       Ignoring Edge event, either handle type is not personalization:decisions, or the response isn't intended for this extension.
                       """)
-            propositionsInProgress.removeAll()
+            let keys = propositionsInProgress.keys
+            for key in keys {
+                propositionsInProgress.removeValue(forKey: key)
+            }
             return
         }
 
@@ -312,7 +321,9 @@ public class Optimize: NSObject, Extension {
         }
 
         // accumulate propositions in in-progress propositions dictionary
-        propositionsInProgress.merge(propositionsDict) { _, new in new }
+        for (key, value) in propositionsDict {
+            propositionsInProgress[key] = value
+        }
 
         let eventData = [OptimizeConstants.EventDataKeys.PROPOSITIONS: propositionsDict].asDictionary()
 
@@ -420,17 +431,23 @@ public class Optimize: NSObject, Extension {
 
         /// For testing purposes only
         func getUpdateRequestEventIdsInProgress() -> [String: [DecisionScope]] {
-            updateRequestEventIdsInProgress
+            updateRequestEventIdsInProgress.shallowCopy
         }
 
         /// For testing purposes only
         func setPropositionsInProgress(_ propositions: [DecisionScope: OptimizeProposition]) {
-            propositionsInProgress = propositions
+            let keys = propositionsInProgress.keys
+            for key in keys {
+                propositionsInProgress.removeValue(forKey: key)
+            }
+            for (key, value) in propositions {
+                propositionsInProgress[key] = value
+            }
         }
 
         /// For testing purposes only
         func getPropositionsInProgress() -> [DecisionScope: OptimizeProposition] {
-            propositionsInProgress
+            propositionsInProgress.shallowCopy
         }
     #endif
 }
